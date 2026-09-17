@@ -230,7 +230,8 @@ body{background:var(--bg);color:#f4efdf;font:15px/1.5 'Noto Sans TC',system-ui,s
 const $=id=>document.getElementById(id);
 const SUITS=['♠','♥','♦','♣'],RANKS=['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
 const HAND_NAMES=['高牌','一對','兩對','三條','順子','同花','葫蘆','四條','同花順','皇家同花順'];
-const SB=5,BB=10,START_CHIPS=1000;
+const SB=5,BB=10,START_CHIPS=1000,TABLE_SIZE=6;
+const BOT_NAMES=['小K','老千','幸運兒','鐵公雞','阿爾發','賭神','影武者','冷面殺手'];
 
 // ── State ──
 let peer=null, conns=[], isHost=false, myId='', roomCode='', myName='';
@@ -260,7 +261,7 @@ function createRoom(){
   initPeer('poker-'+roomCode, ()=>{
     showScreen('waitRoom');
     $('roomCodeDisplay').textContent=roomCode;
-    updateWaitRoom([{name:myName,id:myId,isHost:true}]);
+    initLobby();
   });
 }
 
@@ -324,7 +325,7 @@ function broadcastLobby(){
   const data={type:'lobby',players:lobbyPlayers};
   conns.forEach(c=>{if(c.open)c.send(data)});
   updateWaitRoom(lobbyPlayers);
-  $('startGameBtn').disabled=lobbyPlayers.length<2;
+  $('startGameBtn').disabled=lobbyPlayers.length<1;
 }
 
 function updateWaitRoom(players){
@@ -334,7 +335,7 @@ function updateWaitRoom(players){
       <div class="pname">${esc(p.name)}</div>
       ${p.isHost?'<div class="host-tag">房主</div>':''}
     </div>`).join('');
-  $('waitingText').textContent=players.length<2?'等待玩家加入':'準備就緒 · '+players.length+' 位玩家';
+  $('waitingText').textContent=players.length<2?'可直接開始，缺的座位會補電腦玩家':'準備就緒 · '+players.length+' 位玩家';
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
@@ -373,16 +374,22 @@ function handleMessage(msg,conn){
 
 // ── Host: Game Logic ──
 function hostStartGame(){
-  if(lobbyPlayers.length<2)return;
-  initGameState();
+  if(lobbyPlayers.length<1)return;
+  const botsNeeded=Math.max(0,TABLE_SIZE-lobbyPlayers.length);
+  const shuffledNames=shuffle([...BOT_NAMES]);
+  const bots=[];
+  for(let i=0;i<botsNeeded;i++){
+    bots.push({name:(shuffledNames[i]||'NPC'+(i+1))+' 🤖',id:'bot-'+i,isHost:false,isBot:true});
+  }
+  initGameState([...lobbyPlayers,...bots]);
   broadcastState();
   showScreen('game');
 }
 
-function initGameState(){
+function initGameState(playersList){
   G={
-    players:lobbyPlayers.map((p,i)=>({
-      name:p.name,peerId:p.id,chips:START_CHIPS,
+    players:playersList.map((p,i)=>({
+      name:p.name,peerId:p.id,chips:START_CHIPS,isBot:!!p.isBot,
       hand:[],bet:0,totalBet:0,folded:false,allIn:false
     })),
     deck:[],community:[],pot:0,dealerIdx:0,
@@ -407,6 +414,7 @@ function startHand(){
   G.currentIdx=(bb+1)%n;
   note(`新一手牌開始。莊家：${G.players[G.dealerIdx].name}`);
   broadcastState();
+  maybeScheduleBot();
 }
 
 function hostPlaceBet(idx,amount){
@@ -443,6 +451,51 @@ function hostPlayerAction(pIdx,act,amount=0){
   if(nxt===-1||isRoundOver()){hostNextPhase();return}
   G.currentIdx=nxt;
   broadcastState();
+  maybeScheduleBot();
+}
+
+// ── Bot AI ──
+function maybeScheduleBot(){
+  if(!G||G.phase==='showdown'||G.phase==='lobby')return;
+  const idx=G.currentIdx;
+  if(idx<0||!G.players[idx]||!G.players[idx].isBot)return;
+  const myTurnToken=G.turnToken=(G.turnToken||0)+1;
+  setTimeout(()=>{
+    if(!G||G.turnToken!==myTurnToken)return; // state moved on already
+    if(G.currentIdx!==idx||!G.players[idx]||G.players[idx].folded)return;
+    const decision=botDecide(G.players[idx],G);
+    hostPlayerAction(idx,decision.action,decision.amount||0);
+  },900+Math.random()*900);
+}
+
+function botDecide(p,G){
+  const callAmt=G.minBet-p.bet;
+  let strength=0.3+Math.random()*0.25;
+  if(G.community.length>=3){
+    const ev=evaluate([...p.hand,...G.community]);
+    strength=Math.min(0.95,0.15+ev.rank/9*0.8+Math.random()*0.1);
+  }else{
+    const r1=p.hand[0].rank,r2=p.hand[1].rank;
+    strength+= r1===r2 ? 0.25+r1/13*0.2 : Math.max(r1,r2)/13*0.25;
+    strength=Math.min(0.9,strength);
+  }
+
+  if(callAmt<=0){
+    if(strength>0.75&&Math.random()<0.5){
+      const raiseAmt=Math.min(p.chips+p.bet,G.minBet+Math.max(G.lastRaise,BB)+Math.round((G.lastRaise||BB)*(1+Math.random())));
+      if(raiseAmt>=p.chips+p.bet)return{action:'allin'};
+      if(raiseAmt>G.minBet)return{action:'raise',amount:raiseAmt};
+    }
+    return{action:'check'};
+  }
+  if(callAmt>=p.chips)return strength>0.4?{action:'allin'}:{action:'fold'};
+  if(strength<0.22+Math.random()*0.1)return{action:'fold'};
+  if(strength>0.8&&Math.random()<0.4){
+    const raiseAmt=Math.min(p.chips+p.bet,G.minBet+Math.max(G.lastRaise,BB)+Math.round(G.pot*0.3));
+    if(raiseAmt>=p.chips+p.bet)return{action:'allin'};
+    if(raiseAmt>G.minBet)return{action:'raise',amount:raiseAmt};
+  }
+  return{action:'call'};
 }
 
 function hostNextPhase(){
@@ -459,6 +512,7 @@ function hostNextPhase(){
   else if(G.phase==='river'){hostShowdown();return}
   G.currentIdx=nextPlayer(G.dealerIdx);
   broadcastState();
+  maybeScheduleBot();
 }
 
 function hostShowdown(){
@@ -506,7 +560,7 @@ function buildViewState(myIdx,showAll=false){
     type:'gameState',
     myIdx,
     players:G.players.map((p,i)=>({
-      name:p.name,chips:p.chips,bet:p.bet,
+      name:p.name,chips:p.chips,bet:p.bet,isBot:!!p.isBot,
       folded:p.folded,allIn:p.allIn,
       hand:(i===myIdx||showAll)?p.hand:[],
       _eval:(showAll&&!p.folded&&p._eval)?p._eval.name:null
@@ -574,7 +628,7 @@ function renderGame(){
     div.innerHTML=`
       <div class="seat-cards">${hasCards?p.hand.map(c=>cardHTML(c,true,!showCards&&!p.folded)).join(''):(p.folded?'':'<div class="card mini facedown"><span class="suit"></span></div><div class="card mini facedown"><span class="suit"></span></div>')}</div>
       <div class="seat-info">
-        <div class="seat-name">${pIdx===me?'👤':'🎭'} ${esc(p.name)}</div>
+        <div class="seat-name">${pIdx===me?'👤':(p.isBot?'🤖':'🎭')} ${esc(p.name)}</div>
         <div class="seat-chips">💰 ${p.chips}</div>
         <div class="seat-action">${p.folded?'FOLD':p.allIn?'ALL-IN':pIdx===V.dealerIdx?'🔘 莊家':''}</div>
         ${p.bet>0?`<div class="seat-bet">${p.bet}</div>`:''}
