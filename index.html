@@ -246,13 +246,13 @@ body{background:var(--bg);color:#f4efdf;font:15px/1.5 'Noto Sans TC',system-ui,s
   <div class="lobby-sub">多人連線 · 德州撲克</div>
   <div class="lobby-actions">
     <input type="text" id="nameInput" placeholder="輸入暱稱" maxlength="8" style="background:rgba(255,255,255,0.06);border:1px solid var(--glass-border);border-radius:12px;padding:12px 16px;color:#f4efdf;font:500 16px 'Noto Sans TC',sans-serif;text-align:center;outline:none;width:100%" value="">
-    <button class="btn primary btn-lg" onclick="createRoom()">🎰 建立房間</button>
+    <button class="btn primary btn-lg" id="createBtn" onclick="createRoom()">🎰 建立房間</button>
     <div class="input-group">
       <input type="text" id="joinCode" placeholder="輸入房間代碼" maxlength="4">
-      <button class="btn btn-lg" onclick="joinRoom()">加入</button>
+      <button class="btn btn-lg" id="joinBtn" onclick="joinRoom()">加入</button>
     </div>
   </div>
-  <div class="lobby-info">P2P 連線 · 不需伺服器 · 分享房間代碼即可開玩</div>
+  <div class="lobby-info" id="lobbyInfo">P2P 連線 · 不需伺服器 · 分享房間代碼即可開玩</div>
 </div>
 
 <!-- ── Waiting Room ── -->
@@ -330,11 +330,19 @@ function generateCode(){
   return code;
 }
 
+function setConnecting(on,msg){
+  $('createBtn').disabled=on;
+  $('joinBtn').disabled=on;
+  $('lobbyInfo').textContent=on?(msg||'連線中…'):'P2P 連線 · 不需伺服器 · 分享房間代碼即可開玩';
+}
+
 function createRoom(){
   myName=getMyName();
   roomCode=generateCode();
   isHost=true;
+  setConnecting(true,'建立房間中…');
   initPeer('poker-'+roomCode, ()=>{
+    setConnecting(false);
     showScreen('waitRoom');
     $('roomCodeDisplay').textContent=roomCode;
     initLobby();
@@ -347,9 +355,12 @@ function joinRoom(){
   myName=getMyName();
   roomCode=code;
   isHost=false;
+  setConnecting(true,'連線中…');
   initPeer(null, ()=>{
+    setConnecting(true,'搜尋房間中…');
     const conn=peer.connect('poker-'+roomCode,{reliable:true});
     conn.on('open',()=>{
+      setConnecting(false);
       conns=[conn];
       conn.send({type:'join',name:myName,id:myId});
       showScreen('waitRoom');
@@ -358,8 +369,8 @@ function joinRoom(){
     });
     conn.on('data',d=>handleMessage(d,conn));
     conn.on('close',()=>{toast('與房主斷線');leaveRoom()});
-    conn.on('error',()=>toast('連線失敗'));
-    setTimeout(()=>{if(!conn.open)toast('連線逾時，請確認房間代碼')},8000);
+    conn.on('error',()=>{setConnecting(false);toast('連線失敗，請確認房間代碼或稍後再試')});
+    setTimeout(()=>{if(!conn.open){setConnecting(false);toast('連線逾時，請確認房間代碼是否正確、房主是否還在等待室')}},8000);
   });
 }
 
@@ -370,10 +381,26 @@ const ICE_CONFIG={iceServers:[
   {urls:'turn:openrelay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'}
 ]};
 
+const ERROR_MESSAGES={
+  'unavailable-id':'房間代碼已被使用，請重試',
+  'peer-unavailable':'找不到該房間，請確認代碼或房主是否還在線上',
+  'network':'網路連線失敗，請確認網路狀態',
+  'server-error':'訊號伺服器發生錯誤，請稍後再試',
+  'socket-error':'連線被中斷，請確認網路（部分公司/學校網路會擋此類連線）',
+  'socket-closed':'連線被中斷，請重新嘗試',
+  'browser-incompatible':'此瀏覽器不支援連線功能，請換一個瀏覽器再試',
+  'disconnected':'已與伺服器斷線'
+};
+
 function initPeer(id, cb){
   if(peer){peer.destroy()}
   peer=id?new Peer(id,{config:ICE_CONFIG}):new Peer({config:ICE_CONFIG});
+  let opened=false;
+  const openTimeout=setTimeout(()=>{
+    if(!opened){setConnecting(false);toast('連線逾時，請確認網路狀態後再試一次')}
+  },10000);
   peer.on('open',pid=>{
+    opened=true;clearTimeout(openTimeout);
     myId=pid;
     if(isHost){
       peer.on('connection',conn=>{
@@ -391,9 +418,10 @@ function initPeer(id, cb){
     cb();
   });
   peer.on('error',e=>{
-    if(e.type==='unavailable-id')toast('房間代碼已被使用，請重試');
-    else if(e.type==='peer-unavailable')toast('找不到該房間');
-    else console.error(e);
+    clearTimeout(openTimeout);
+    setConnecting(false);
+    toast(ERROR_MESSAGES[e.type]||('連線發生錯誤：'+e.type));
+    console.error(e);
   });
 }
 
@@ -435,6 +463,7 @@ function copyRoomCode(){
 function leaveRoom(){
   if(peer){peer.destroy();peer=null}
   conns=[];G=null;viewState=null;isHost=false;
+  setConnecting(false);
   showScreen('lobby');
 }
 
