@@ -395,9 +395,9 @@ function handleMessage(msg,conn){
     }
   }else{
     if(msg.type==='lobby')updateWaitRoom(msg.players);
-    else if(msg.type==='gameState'){viewState=msg;renderGame()}
-    else if(msg.type==='win'){showWin(msg)}
-    else if(msg.type==='nextHand'){viewState=msg.state;renderGame()}
+    else if(msg.type==='gameState'){viewState=msg;showScreen('game');renderGame()}
+    else if(msg.type==='win'){viewState=msg.state;showScreen('game');showWin(msg);renderGame()}
+    else if(msg.type==='nextHand'){viewState=msg.state;showScreen('game');renderGame()}
     else if(msg.type==='toast'){toast(msg.text)}
   }
 }
